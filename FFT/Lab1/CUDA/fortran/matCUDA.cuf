@@ -1,0 +1,131 @@
+
+
+module KERNELS
+    
+    implicit none    
+    integer, parameter :: SIZE_ = 16384
+    contains
+    attributes(global) subroutine initialize(d_mat)
+    
+        implicit none
+    
+        integer :: tx, ty
+        real*8, dimension(SIZE_,SIZE_) :: d_mat
+    
+        tx = threadIdx%x + (blockIdx%x - 1) * blockDim%x
+        ty = threadIdx%y + (blockIdx%y - 1) * blockDim%y
+
+        if (tx <= SIZE_ .and. ty <=SIZE_) then
+            d_mat(tx,ty) = (ty-1) * SIZE_ + (tx-1)
+        end if
+    end subroutine initialize
+
+    attributes(global) subroutine transpose(d_mat, d_matT)
+    
+        integer :: tx, ty
+        real*8, dimension(SIZE_,SIZE_) :: d_mat, d_matT
+        
+        tx = threadIdx%x + (blockIdx%x - 1) * blockDim%x
+        ty = threadIdx%y + (blockIdx%y - 1) * blockDim%y
+
+        if (tx <= SIZE_ .and. ty <=SIZE_) then
+            d_matT(ty,tx) = d_mat(tx,ty)
+        end if
+    
+    end subroutine transpose
+
+    attributes(global) subroutine matrixMultiply(d_mat, d_matT, d_matSym)
+    
+        integer :: tx, ty, k
+        
+	real*8 :: accum
+        
+	real*8, dimension(SIZE_,SIZE_) :: d_mat, d_matT, d_matSym
+        
+        tx = threadIdx%x + (blockIdx%x - 1) * blockDim%x
+        ty = threadIdx%y + (blockIdx%y - 1) * blockDim%y
+
+        if (tx <= SIZE_ .and. ty <=SIZE_) then
+	    accum = 0.0
+            do k=1, SIZE_
+                accum = accum + (d_mat(k,ty) * d_matT(tx,k))
+            end do
+            d_matSym(tx,ty) = accum
+        end if
+    end subroutine matrixMultiply
+end module KERNELS
+
+program MAIN
+
+    use KERNELS
+    use cudafor
+    
+    implicit none
+
+    include "lib3f.h"
+    integer :: argc
+    character*2 :: argv
+    
+    real*8 :: execTime, start, finish
+    integer :: i, j, TILE_DIM, N
+
+    !Device pointers
+    real*8, dimension(:,:), allocatable, device :: d_mat, d_matT, d_matSym;
+    
+    !Host pointer
+    real*8, dimension(:,:), allocatable :: h_mat
+    
+    N = 1
+    TILE_DIM = 32
+    execTime = 0
+
+    argc = iargc()
+    call getarg(argc, argv)
+
+    if (argc == 1) then
+        read (argv, *) N
+    end if
+
+    print *, SIZE_, "x", SIZE_, "Matrix"
+    print *
+
+    allocate(d_mat(SIZE_,SIZE_), d_matT(SIZE_,SIZE_), d_matSym(SIZE_,SIZE_), h_mat(SIZE_,SIZE_))
+    
+    print *,"Execution times(sec)"
+    do i=1, N
+        
+        call cpu_time(start)
+        
+        !calculates the transpose and then performs matmul to get the symmetric matrix
+        call calculateSymmetricMatrix(TILE_DIM)
+        
+        call cpu_time(finish)
+        execTime = execTime + (finish -start)
+        print *,"At", i, execTime
+    end do
+    
+    deallocate(d_mat, d_matT, d_matSym, h_mat)
+
+    contains
+        subroutine calculateSymmetricMatrix(TILE_DIM)
+            implicit none
+            
+            integer :: err
+            integer, intent(in) :: TILE_DIM
+
+            !dimensions launching a 2D kernel with TILE_DIM x TILE_DIM threads per block
+            type(dim3) :: grid_dim, blk_dim
+            
+            grid_dim = dim3(SIZE_/ TILE_DIM, SIZE_/ TILE_DIM, 1)
+            blk_dim = dim3(TILE_DIM, TILE_DIM, 1)
+
+            call initialize<<<grid_dim, blk_dim>>>(d_mat)
+            err = cudaDeviceSynchronize()
+            
+            call transpose<<<grid_dim, blk_dim>>>(d_mat, d_matT)
+            err = cudaDeviceSynchronize()
+            
+            call matrixMultiply<<<grid_dim, blk_dim>>>(d_mat, d_matT, d_matSym)
+            err = cudaDeviceSynchronize()
+        end subroutine calculateSymmetricMatrix
+end program MAIN    

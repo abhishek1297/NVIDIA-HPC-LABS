@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "cblas.h": "c",
+        "stddef.h": "c",
+        "openblas_config.h": "c",
+        "lapacke.h": "c"
+    }
+}

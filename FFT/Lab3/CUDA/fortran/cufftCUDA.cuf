@@ -1,0 +1,191 @@
+!*************************************************
+!A separate module is required for writing kernels
+!*************************************************
+module KERNELS
+
+    !Contains all the necessary variables and functions
+    !for execution
+    use CUHELPER
+
+    contains
+
+        !init kernel to generate a random sine wave
+        attributes(global) subroutine initSineWave(d_inputFFT, d_freqArray)
+            
+            !Each thread is executing this kernel and will compute and assign a random wave input
+            !for a given global thread index.
+            
+            implicit none
+
+            integer :: tIdx, j, d_freqArray(:)
+            double complex :: d_inputFFT(:)
+            real*8 :: val, commonCalc, W1, W2, DELTA_W, AVG_W
+            
+            !***********************************************************************************
+            !The following code is a sequential code that needs to be written inside this kernel.
+            !The outer loop should be parallelized.
+            !Everything inside the loop (////seq////) is executed sequentially by each thread.
+            !Each occurance of i should be replace with the thread index
+            !***********************************************************************************
+            
+            !outer:do i=1, SIGNAL_SIZE
+            !//////////////////Sequential Part//////////////////////
+            
+            !    val = 0.0
+            !    commonCalc = TWO_PI * (i-1) / NUM_SAMPLES
+            !    W1 = FREQUENCY * commonCalc
+            !    inner:do j=1, ITERS
+            !        W2  = h_freqArray(j) * commonCalc
+            !        DELTA_W = DABS(W1 - W2)
+            !        AVG_W = (W1 + W2) * 0.5
+            !        val = val + 2 * COS(DELTA_W * 0.5 * (i-1)) * SIN(AVG_W * (i-1))
+            !    end do inner
+            !    h_inputFFT(i) = dcmplx(val / ITERS, 0.0)
+            
+            !//////////////////Sequential End//////////////////////
+            !end do outer
+
+        end subroutine initSineWave
+
+        attributes(global) subroutine computeError(d_inputFFT, d_outputFFT)
+
+            !calculate the differences between input and retrieved signals
+            implicit none
+
+            real*8 :: diff
+            double complex :: d_inputFFT(:), d_outputFFT(:)
+            !***********************************************************************
+            !Each thread is calculating the difference between InputFFT and outputFFT
+            !Normalize outputFFT by the SIGNAL_SIZE
+            !DABS() is used for finding the absolute value for a double precision number
+            !Store the results in the real part of the output array
+            ! diff = DABS(real(d_inputFFT(i) - (real(d_outputFFT(i))/SIGNAL_SIZE)))
+            ! d_outputFFT(i) = dcmplx(diff, 0)
+            !Due to memory limitations we had to overwrite the output array.
+            !************************************************************************/
+
+        end subroutine computeError
+end module KERNELS
+
+program MAIN
+
+    use fileReader
+    use CUHELPER
+    use KERNELS
+    !CUDA includes
+    use cudafor
+    use cufft
+    
+    implicit none
+
+    !Storing returned errors
+    integer :: err
+    
+    print *, "==============Execution================"
+    print *
+    print *, "SIGNAL SIZE = ", SIGNAL_SIZE
+    print *
+
+    !Allocating pointers
+    allocate(d_inputFFT(SIGNAL_SIZE),  d_outputFFT(SIGNAL_SIZE), d_freqArray(ITERS), h_errors(SIGNAL_SIZE))
+
+    !Initializing
+    call initialize()
+    
+    !Executing FFT + IFFT
+    call executeFFT()
+    
+    !Calculating difference between inputFFT and inverse outputFFT
+    call calculateDifference()
+    
+    !************************************************************************
+    !copy the difference results stored in h_outputFFT into h_errors on the CPU.
+    !h_errors is required by the printMeanError()
+    !************************************************************************
+
+    print *
+    !printMeanError uses h_errors for finding the mean error
+    call printMeanError(h_errors)
+    
+    !Deallocating pointers
+    deallocate(d_inputFFT, d_outputFFT, d_freqArray, h_errors)
+
+    print *
+    print *, "==============Terminated================"
+    print *
+
+    contains
+
+        subroutine initialize()
+
+            implicit none
+            !***********************************************************************
+            !GRID dimension and BLOCK dimension are kernel launch parameters
+            !Set those values in the following variables and then use them while
+            !launching the kernel.
+            !***********************************************************************
+
+            integer, parameter :: GRID_DIM = 0
+            integer, parameter :: BLK_DIM = 0
+
+            integer, dimension(ITERS) :: h_freqArray
+
+            !reading a file and loading the frequencies
+            call loadFrequencies("../../Common/frequencies.txt", h_freqArray, ITERS)
+            
+            !***********************************************************************
+            ! Transfer the frequencies to the d_freqArray in the GPU.
+            ! Call the initSineWave kernel with above launch parameters here.
+            ! Synchronize the kernel launch as well.
+            !************************************************************************
+
+        end subroutine initialize
+
+        subroutine executeFFT()
+
+            implicit none
+            
+            integer :: plan, err
+
+            !***********************************************************************
+            !Do the following steps
+            
+            !1. Create a 1D plan of length SIGNAL_SIZE in double precision
+            !for Complex to Complex Transform.
+
+            !2. Execute FFT (time to frequency) for given input signal
+            !    -Do an out of place transform
+            !    i.e use two different arrays for input and output
+            
+            !3. Execute Inverse FFT (frequency to time) for the given output of fft
+            !    -Do an in-place transform
+            !    i.e use the same array for input and output. Use output array
+            !    -Input array must not be updated
+            !***********************************************************************
+            
+            err = err + cufftDestroy(plan)
+        
+        end subroutine executeFFT
+        
+        subroutine calculateDifference()
+
+            implicit none
+
+            !***********************************************************************
+            !GRID dimension and BLOCK dimension are kernel launch parameters
+            !Set those values in the following variables and then use them while
+            !launching the kernel.
+            !***********************************************************************
+
+            integer, parameter :: GRID_DIM = 0
+            integer, parameter :: BLK_DIM = 0
+            integer :: err
+            
+            !************************************
+            !Launch the computeError kernel here
+            !Synchronize the kernel launch as well.
+            !************************************
+          
+          end subroutine calculateDifference
+
+end program MAIN

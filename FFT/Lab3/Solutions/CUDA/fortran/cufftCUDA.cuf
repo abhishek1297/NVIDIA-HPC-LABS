@@ -1,0 +1,209 @@
+module KERNELS
+
+    !Contains all the necessary variables and functions
+    !for execution
+    use CUHELPER
+
+    contains
+
+        !init kernel to generate a random sine wave
+        attributes(global) subroutine initSineWave(d_inputFFT, d_freqArray)
+            
+            !Each thread is executing this kernel and will compute and assign a random wave input
+            !for a given global thread index.
+            
+            implicit none
+
+            integer :: tIdx, j, d_freqArray(:)
+            double complex :: d_inputFFT(:)
+            real*8 :: val, commonCalc, W1, W2, DELTA_W, AVG_W
+            
+            !global thread index
+            tIdx = threadIdx%x + (blockIdx%x - 1) * blockDim%x
+
+            if (tIdx <= SIGNAL_SIZE) then
+
+                val = 0.0
+                commonCalc = TWO_PI * (tIdx-1) / NUM_SAMPLES
+                W1 = FREQUENCY * commonCalc
+                
+                do j=1, ITERS
+                    W2  = d_freqArray(j) * commonCalc
+                    DELTA_W = DABS(W1 - W2)
+                    AVG_W = (W1 + W2) * 0.5
+                    val = val + 2 * COS(DELTA_W * 0.5 * (tIdx-1)) * SIN(AVG_W * (tIdx-1))
+                end do
+
+                d_inputFFT(tIdx) = dcmplx(val / ITERS, 0.0)
+            end if
+        end subroutine initSineWave
+
+        attributes(global) subroutine computeError(d_inputFFT, d_outputFFT)
+
+            !calculate the differences between input and retrieved signals
+            implicit none
+
+            integer :: tIdx
+            real*8 :: diff
+            double complex :: d_inputFFT(:), d_outputFFT(:)
+            
+            !global thread index
+            tIdx = threadIdx%x + (blockIdx%x-1) * blockDim%x
+
+            if (tIdx <= SIGNAL_SIZE) then
+
+                !normalize the inverse fft output
+                diff = DABS(real(d_inputFFT(tIdx) - (real(d_outputFFT(tIdx))/SIGNAL_SIZE)))
+                
+                !storing the difference in outputFFT
+                d_outputFFT(tIdx) = dcmplx(diff, 0)
+            end if
+        end subroutine computeError
+end module KERNELS
+
+program MAIN
+
+    use fileReader
+    use CUHELPER
+    use KERNELS
+    !CUDA includes
+    use cudafor
+    use cufft
+    
+    implicit none
+
+    !For CL Inputs
+    include "lib3f.h"
+    integer :: i, N, argc
+    character*2 :: argv
+
+    !Storing returned errors
+    integer :: err
+    
+    !Creating events
+    err = cudaEventCreate(start)
+    err = cudaEventCreate(stop)
+    
+    argc = iargc()
+    call getarg(argc, argv)
+
+    N = 1
+    if (argc == 1) then
+        read (argv, *) N
+    end if
+
+    print *, "==============Execution================"
+    print *
+    print *, "SIGNAL SIZE = ", SIGNAL_SIZE
+    print *
+    print *, "Times in seconds"
+
+    !Allocating pointers
+    allocate(d_inputFFT(SIGNAL_SIZE),  d_outputFFT(SIGNAL_SIZE), d_freqArray(ITERS), h_errors(SIGNAL_SIZE))
+    
+    do i=1, N
+
+        !Initializing
+        call initialize()
+        !Executing FFT + IFFT
+        call executeFFT()
+        !Calculating difference between inputFFT and inverse outputFFT
+        call calculateDifference()
+        print *, "INIT:", initTime, "FFT:", fftTime, "DIFF:", diffTime
+        print *,"TOTAL:", execTime
+        print *
+    end do
+
+    !Data transfer to device to host
+    h_errors = d_outputFFT
+    print *
+    !printMeanError uses h_errors for finding the mean error
+    call printMeanError(h_errors)
+    
+    !Deallocating pointers
+    deallocate(d_inputFFT, d_outputFFT, d_freqArray, h_errors)
+
+    err = cudaEventDestroy(start)
+    err = cudaEventDestroy(stop)
+
+    print *
+    print *, "==============Terminated================"
+    print *
+
+    contains
+
+        subroutine initialize()
+
+            implicit none
+
+            integer, parameter :: GRID_DIM = ceiling(SIGNAL_SIZE/REAL(1024))
+            integer, parameter :: BLK_DIM = 1024
+            integer, dimension(ITERS) :: h_freqArray
+
+            !reading a file and loading the frequencies
+            call loadFrequencies("../../../Common/frequencies.txt", h_freqArray, ITERS)
+            !Data transfer host to device
+            d_freqArray = h_freqArray
+            
+            err = cudaEventRecord(start,0)
+
+            !Launching the kernel
+            call initSineWave<<<GRID_DIM, BLK_DIM>>>(d_inputFFT, d_freqArray)
+            
+            err = cudaEventRecord(stop,0)
+            err = cudaEventSynchronize(stop)
+            err = cudaEventElapsedTime(initTime, start, stop)
+
+            initTime = initTime / 1000
+            execTime = execTime + initTime
+        end subroutine initialize
+
+        subroutine executeFFT()
+
+            implicit none
+            
+            integer :: plan, err
+
+            err = cudaEventRecord(start,0)
+            
+            !Create a cufft plan for Z2Z i.e complex to complex in Double precision
+            err = cufftPlan1d(plan, SIGNAL_SIZE, CUFFT_Z2Z, 1)
+            
+            !Perform FFT
+            err = err + cufftExecZ2Z(plan, d_inputFFT, d_outputFFT, CUFFT_FORWARD)
+            
+            !Perform Inverse FFT
+            err = err + cufftExecZ2Z(plan, d_outputFFT, d_outputFFT, CUFFT_INVERSE)
+            
+            err = err + cufftDestroy(plan)
+
+            err = cudaEventRecord(stop,0)
+            err = cudaEventSynchronize(stop)
+            err = cudaEventElapsedTime(fftTime, start, stop)
+
+            fftTime = fftTime / 1000
+            execTime = execTime + fftTime
+        end subroutine executeFFT
+        
+        subroutine calculateDifference()
+
+            implicit none
+
+            integer, parameter :: GRID_DIM = ceiling(SIGNAL_SIZE/REAL(64))
+            integer, parameter :: BLK_DIM = 64
+            integer :: err
+            
+            err = cudaEventRecord(start,0)
+
+            !launch the kernel to calculate the differences
+            call computeError<<<GRID_DIM, BLK_DIM>>>(d_inputFFT, d_outputFFT)
+            
+            err = cudaEventRecord(stop,0)
+            err = cudaEventSynchronize(stop)
+            err = cudaEventElapsedTime(diffTime, start, stop)
+
+            diffTime = diffTime / 1000
+            execTime = execTime + diffTime   
+        end subroutine calculateDifference
+
+end program MAIN
